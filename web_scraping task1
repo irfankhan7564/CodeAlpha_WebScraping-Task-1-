@@ -1,0 +1,91 @@
+!pip install -q requests beautifulsoup4 lxml pandas
+
+import requests
+from bs4 import BeautifulSoup
+import json
+import re
+import time
+import pandas as pd
+
+BASE_URL = "https://scrapingsandbox.com"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (CodeAlpha-Internship-Scraper/1.0; educational use)"
+}
+
+print("Libraries loaded successfully.")
+
+def extract_product_json(html: str):
+    """Extract the embedded product JSON object from a Scraping Sandbox product page."""
+    soup = BeautifulSoup(html, "lxml")
+
+    # 1) Preferred: the JSON is shown inside a <pre>/<code> block on the page
+    for tag in soup.find_all(["pre", "code"]):
+        text = tag.get_text(strip=True)
+        if text.startswith("{") and '"sku"' in text:
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                continue
+
+    # 2) Fallback: regex-extract a JSON object starting with {"id": ...}
+    match = re.search(r'\{\s*"id"\s*:\s*\d+.*?"variants"\s*:\s*\[.*?\]\s*\}', html, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            return None
+
+    return None
+
+
+def scrape_product(product_id: int, session: requests.Session, retries: int = 2):
+    """Fetch and parse a single product page. Returns a dict or None if it fails/doesn't exist."""
+    url = f"{BASE_URL}/product/{product_id}"
+    for attempt in range(retries + 1):
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=15)
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            data = extract_product_json(resp.text)
+            if data:
+                data["source_url"] = url
+            return data
+        except requests.exceptions.RequestException:
+            if attempt == retries:
+                return None
+            time.sleep(1.5)
+    return None
+
+
+print("Scraper functions ready.")
+
+N_PRODUCTS = 500
+records = []
+failed_ids = []
+
+session = requests.Session()
+
+for pid in range(1, N_PRODUCTS + 1):
+    product = scrape_product(pid, session)
+    if product:
+        records.append(product)
+    else:
+        failed_ids.append(pid)
+
+    if pid % 50 == 0:
+        print(f"Scraped {pid}/{N_PRODUCTS} product pages...")
+
+    time.sleep(0.15)  # polite delay so we don't hammer the server
+
+print(f"\nDone. Successfully scraped {len(records)} products. Failed/missing IDs: {failed_ids}")
+
+# Flatten into a tidy DataFrame
+df = pd.DataFrame(records)
+df["tags"] = df["tags"].apply(lambda t: ", ".join(t) if isinstance(t, list) else t)
+df["variant_count"] = df["variants"].apply(lambda v: len(v) if isinstance(v, list) else 0)
+df = df.drop(columns=["variants"])
+
+df.to_csv("products.csv", index=False)
+print("Saved products.csv with", len(df), "rows and", df.shape[1], "columns.")
+df.head(10)
